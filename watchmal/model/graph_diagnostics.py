@@ -144,9 +144,12 @@ def build_batch_summary(
 
         edge_counts: list[int] = []
         total_edges = 0
+        invalid_edge_rows = 0
         if edge_index is not None and edge_index.numel() > 0:
             row = edge_index[0]
-            edge_counts = _cpu_counts(batch[row], num_graphs)
+            valid_row = (row >= 0) & (row < batch.numel())
+            invalid_edge_rows = int((~valid_row).sum().item())
+            edge_counts = _cpu_counts(batch[row[valid_row]], num_graphs)
             total_edges = int(edge_index.size(1))
 
         event_ids, event_ids_status = event_ids_from_data(data, num_graphs)
@@ -180,6 +183,7 @@ def build_batch_summary(
             "total_edges": int(total_edges),
             "edges_per_graph": edge_counts,
             "edges_per_graph_stats": edge_stats,
+            "invalid_edge_rows": invalid_edge_rows,
             "event_ids": event_ids,
             "event_ids_status": event_ids_status,
             "tensor_meta": tensor_meta,

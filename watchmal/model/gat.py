@@ -431,6 +431,7 @@ class GraphAttentionNetwork(nn.Module):
             f"{prefix} stage={summary['stage']} forward_counter={summary['forward_counter']} "
             f"graphs={summary['num_graphs']} nodes={summary['total_nodes']} edges={summary['total_edges']} "
             f"node_stats={summary['nodes_per_graph_stats']} edge_stats={summary['edges_per_graph_stats']} "
+            f"invalid_edge_rows={summary['invalid_edge_rows']} "
             f"event_ids_status={summary['event_ids_status']} event_ids={summary['event_ids']} "
             f"nodes_per_graph={summary['nodes_per_graph']} edges_per_graph={summary['edges_per_graph']} "
             f"tensors={summary['tensor_meta']}"
