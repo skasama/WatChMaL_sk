@@ -23,6 +23,39 @@ to every hit of their own event and reads the event representation off them. Set
 `knn_k` moves edge construction into the forward pass, from `data.pos`, which requires a
 dataset that stores hit coordinates there — the stored PyG datasets do not.
 
+### GAT graph diagnostics (opt-in, default off)
+
+`watchmal/model/gat.py` has optional diagnostics for investigating pathological batches
+and CUDA OOM failures without changing the model math.
+
+- `WATCHMAL_GRAPH_DIAGNOSTICS=1`: enable diagnostics.
+- `WATCHMAL_GRAPH_DIAGNOSTICS_EVERY=N`: periodic logging every `N` model forwards.
+- `WATCHMAL_GRAPH_DIAGNOSTICS_MAX_NODES=N`: force a detailed log when a batch exceeds `N` nodes.
+- `WATCHMAL_GRAPH_DIAGNOSTICS_MAX_EDGES=N`: force a detailed log when a batch exceeds `N` edges.
+- `WATCHMAL_GRAPH_DIAGNOSTICS_VALIDATE=off|warn|raise`: edge validation mode.
+- `WATCHMAL_GRAPH_DIAGNOSTICS_MAX_EDGE_NODE_RATIO=R`: validation threshold for edges/nodes.
+- `WATCHMAL_GRAPH_DIAGNOSTICS_LOG_CUDA_MEMORY=0|1`: include CUDA allocated/reserved/free memory.
+
+Example run:
+
+```bash
+WATCHMAL_GRAPH_DIAGNOSTICS=1 \
+WATCHMAL_GRAPH_DIAGNOSTICS_EVERY=250 \
+WATCHMAL_GRAPH_DIAGNOSTICS_MAX_NODES=10000 \
+WATCHMAL_GRAPH_DIAGNOSTICS_MAX_EDGES=100000 \
+WATCHMAL_GRAPH_DIAGNOSTICS_VALIDATE=warn \
+WATCHMAL_GRAPH_DIAGNOSTICS_MAX_EDGE_NODE_RATIO=12 \
+WATCHMAL_GRAPH_DIAGNOSTICS_LOG_CUDA_MEMORY=1 \
+python main.py --config-path tutorial/config/caverns/main --config-name gat_vertex_regression
+```
+
+Interpretation rule of thumb:
+
+- **Pathological event/graph**: one batch shows a sharp spike in per-graph nodes/edges
+  (and often one event ID dominates the max).
+- **Cumulative growth/leak-like behaviour**: per-graph sizes stay normal but CUDA
+  allocated/reserved trend upward across many forwards until OOM.
+
 Pair these with the graph engines: `engine/gnn_classifier.yaml`
 (→ `watchmal.engine.graph.classification.ClassifierEngine`) or `engine/gnn_regressor.yaml`
 (→ `watchmal.engine.graph.regression.RegressionEngine`). Models without a shipped config
