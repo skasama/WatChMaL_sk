@@ -43,6 +43,11 @@ from torch_geometric.utils import softmax, scatter
 # WatChMaL imports
 from watchmal.model.node_encoder import NodeEncoder, get_activation
 from watchmal.model.knn_edges import build_knn_edge_index
+from watchmal.model.graph_diagnostics import (
+    GraphDiagnosticsConfig,
+    build_batch_summary,
+    validate_graph_edges,
+)
 from watchmal.utils.logging_utils_caverns import setup_logging
 
 log = setup_logging(__name__)
@@ -184,6 +189,8 @@ class GraphAttentionNetwork(nn.Module):
         self.knn_undirected = knn_undirected
         self.use_nhits = use_nhits
         self.use_event_total_charge = use_event_total_charge
+        self._graph_diagnostics = GraphDiagnosticsConfig.from_env()
+        self._forward_counter = 0
 
         self.encoder = NodeEncoder(
             in_channels + position_dim,
@@ -301,13 +308,37 @@ class GraphAttentionNetwork(nn.Module):
         return torch.cat([x, value], dim=1)
 
     def forward(self, data):
+        self._forward_counter += 1
+        forward_counter = self._forward_counter
+
         # num_graphs is read from the batch rather than from batch.max()+1: the two
         # disagree when the last graph of a batch has no hits, which makes the CLS
         # readout view fail and the mean-pool readout return too few rows.
         num_graphs = data.num_graphs
         batch = data.batch
 
-        edge_index = self.edges(data, batch)
+        try:
+            edge_index = self.edges(data, batch)
+        except torch.OutOfMemoryError:
+            self._log_oom_batch_summary(
+                data=data,
+                batch=batch,
+                edge_index=None,
+                num_graphs=num_graphs,
+                forward_counter=forward_counter,
+                stage='edge_construction',
+                extra_tensors=None,
+            )
+            raise
+
+        self._maybe_log_graph_diagnostics(
+            data=data,
+            batch=batch,
+            edge_index=edge_index,
+            num_graphs=num_graphs,
+            forward_counter=forward_counter,
+        )
+
         x = self.encoder(self.encoder_input(data))
 
         if self.use_cls:
@@ -315,8 +346,20 @@ class GraphAttentionNetwork(nn.Module):
                 x, edge_index, batch, num_graphs
             )
 
-        for layer in self.attn_layers:
-            x = layer(x, edge_index)
+        try:
+            for layer in self.attn_layers:
+                x = layer(x, edge_index)
+        except torch.OutOfMemoryError:
+            self._log_oom_batch_summary(
+                data=data,
+                batch=batch,
+                edge_index=edge_index,
+                num_graphs=num_graphs,
+                forward_counter=forward_counter,
+                stage='attention',
+                extra_tensors={'encoded_x': x},
+            )
+            raise
 
         if self.use_cls:
             graph_representation = x[num_real:].view(num_graphs, -1)
@@ -331,3 +374,72 @@ class GraphAttentionNetwork(nn.Module):
                 graph_representation, data, 'event_total_charge')
 
         return self.classifier(graph_representation)
+
+    def _maybe_log_graph_diagnostics(self, data, batch, edge_index, num_graphs, forward_counter):
+        cfg = self._graph_diagnostics
+        if not cfg.enabled:
+            return
+
+        summary = build_batch_summary(
+            data=data,
+            batch=batch,
+            edge_index=edge_index,
+            num_graphs=num_graphs,
+            forward_counter=forward_counter,
+            stage='pre_attention',
+            include_cuda_memory=cfg.log_cuda_memory,
+        )
+
+        validation_issues = []
+        if cfg.validate_mode != 'off':
+            validation_issues = validate_graph_edges(
+                edge_index=edge_index,
+                batch=batch,
+                num_graphs=num_graphs,
+                allow_self_loops=self.knn_loop,
+                max_edge_node_ratio=cfg.max_edge_node_ratio,
+            )
+
+        if validation_issues:
+            message = (
+                f"[GNN-DIAG] forward_counter={forward_counter} "
+                f"edge validation issues: {'; '.join(validation_issues)}"
+            )
+            if cfg.validate_mode == 'raise':
+                raise ValueError(message)
+            log.warning(message)
+
+        if cfg.should_log(forward_counter, summary['total_nodes'], summary['total_edges']):
+            self._log_summary(summary, prefix='[GNN-DIAG]')
+
+    def _log_oom_batch_summary(self, data, batch, edge_index, num_graphs, forward_counter, stage, extra_tensors):
+        summary = build_batch_summary(
+            data=data,
+            batch=batch,
+            edge_index=edge_index,
+            num_graphs=num_graphs,
+            forward_counter=forward_counter,
+            stage=stage,
+            extra_tensors=extra_tensors,
+            include_cuda_memory=True,
+        )
+        self._log_summary(summary, prefix='[GNN-OOM]')
+
+    @staticmethod
+    def _log_summary(summary, prefix):
+        msg = (
+            f"{prefix} stage={summary['stage']} forward_counter={summary['forward_counter']} "
+            f"graphs={summary['num_graphs']} nodes={summary['total_nodes']} edges={summary['total_edges']} "
+            f"node_stats={summary['nodes_per_graph_stats']} edge_stats={summary['edges_per_graph_stats']} "
+            f"invalid_edge_rows={summary['invalid_edge_rows']} "
+            f"event_ids_status={summary['event_ids_status']} event_ids={summary['event_ids']} "
+            f"nodes_per_graph={summary['nodes_per_graph']} edges_per_graph={summary['edges_per_graph']} "
+            f"tensors={summary['tensor_meta']}"
+        )
+        cuda_memory = summary.get('cuda_memory')
+        if cuda_memory is not None:
+            msg += f" cuda_memory={cuda_memory}"
+        if prefix == '[GNN-OOM]':
+            log.warning(msg)
+        else:
+            log.info(msg)
